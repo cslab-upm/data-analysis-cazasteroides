@@ -112,7 +112,7 @@ avgPointsDetec[is.na(avgPointsDetec)] <- 0
 avgPointsDetec[c(avgPointsDetec > 5)] <- 5 # Caso en el que un usuario ha obtenido mas de 150 puntos por detenccion. En principio no se puede dar el caso.
 avgPointsDetec <- round(avgPointsDetec, 1)
 pointsActivity <- ifelse(((0.1)*usersByDetections$sDetections$approved - (0.1)*usersByDetections$sDetections$rejected + (0.1)*usersByDetections$sVotes$total + (ifelse(usersByDetections$sDetections$total > avgD, 1,0))) 
- > 4.99, 5, ((0.1)*usersByDetections$sDetections$approved - (0.1)*usersByDetections$sDetections$rejected + (0.1)*usersByDetections$sVotes$total + (ifelse(usersByDetections$sDetections$total > 60, 1,0))) 
+ > 4.99, 5, ((0.1)*usersByDetections$sDetections$approved - (0.1)*usersByDetections$sDetections$rejected + (0.1)*usersByDetections$sVotes$total + (ifelse(usersByDetections$sDetections$total > avgD, 1,0))) 
 )
 pointsActivity[is.na(pointsActivity)] <- 0
 pointsActivity <- round(pointsActivity, 1)
