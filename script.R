@@ -73,10 +73,9 @@ get_effect_percentage <- function(users, mode) {
 #   return (data[data$`_id` == id,]) 
 # }
 
-grafico <- function(x, y, header, xtag, ytag){
-  plot(x,y, main = header, xlab = xtag, ylab = ytag)
+grafico <- function(x, y, header, xtag, ytag, color){
+  plot(x,y, main = header, xlab = xtag, ylab = ytag, col = color)
 }
-
 
 #grafico(users_by_points$points, get_effect_percentage(users_by_points),"'Actives' users by points/effectivity", "Points", "Effectivity" )
 
@@ -89,43 +88,24 @@ users <- users[c(users$points > 0),] #1072 usuarios
 usersByDetections <- users[c(users$sDetections$points > 0),] #541 usuarios
 usersByVotes <- users[c(users$sVotes$points > 0),] #921 usuarios
 
-# Nos centramos en los usuarios que han obtenido puntuación mediante detecciones, estamos clasificando mediante puntos por detecciones / efecitivdad.
-# grafico(usersByDetections$sDetections$points, effectivityUsers,"'Actives' users by points/effectivity", "Points", "Effectivity" )
-# Se sigue que, la gran mayoria de usuarios se concentran en el intervalo [0-10000].
-
-# Se obtiene que la media de puntos por deteccion es de 28.02 puntos por deteccion y la media de detecciones por usuario es de 123. 
-avgPD <- sum(usersByDetections$sDetections$points / usersByDetections$sDetections$total) / length(usersByDetections$points)
-avgD <- sum(usersByDetections$sDetections$total) / length(usersByDetections$points) 
-# usersByDetectionsOverRatio <- usersByDetections[c((usersByDetections$sDetections$points / usersByDetections$sDetections$total > 28) | (usersByDetections$sDetections$total > 60) ),]
-# grafico(usersByDetectionsOverRatio$sDetections$points, get_effect_percentage(usersByDetectionsOverRatio, 0),"'Actives' users by points/effectivity", "Points", "Effectivity" )
-# Viendo que asi obtenemos los usuarios activos, se ve que a pesar de ello la grafica sigue con la misma dinamica, el motivo es por la visualizacion 
-# en funcion de los puntos de los usuarios.
-# Veamos que ocurre si, el eje X, pasa a ser un valor relacionado con la actividad de los usuarios, es decir, tratar de cuantificar como de activos son los usuarios.
-# De esta forma, podemos ver claramente que un usuario que ha realizado multiples detecciones y votaciones,
-# es un usuario activo al igual que un usuario que ha obtenido por ejemplo 150000 puntos. De esta manera, ampliaremos la grafica y podemos realizar una clusterizacion mas precisa.
-# La cuatificacion sobre 10, una primera parte que se calcula en funcion de puntos obtenidos por deteccion. avgPointsDetec y la segund parte,
-# pointsActivity es una valoracion entre [0,5] que se asigna al usuario en funcion de su actividad dentro de la plataforma
-# pointsActivity[i] (0.1)*numeroDetecciones - (0.1)*deteccionesRechazadas + (1, si esta por encima de la media de detecciones) + (0.1)*votosTotales. 
-# Por tanto userActivity sera la suma de ambas partes, como maximo cada parte puede sumar 5 puntos y nunca restar.  
-avgPointsDetec <- (usersByDetections$sDetections$points / usersByDetections$sDetections$total) / 30
-avgPointsDetec[is.na(avgPointsDetec)] <- 0
-avgPointsDetec[c(avgPointsDetec > 5)] <- 5 # Caso en el que un usuario ha obtenido mas de 150 puntos por detenccion. En principio no se puede dar el caso.
-avgPointsDetec <- round(avgPointsDetec, 1)
-pointsActivity <- ifelse(((0.1)*usersByDetections$sDetections$approved - (0.1)*usersByDetections$sDetections$rejected + (0.1)*usersByDetections$sVotes$total + (ifelse(usersByDetections$sDetections$total > avgD, 1,0))) 
- > 4.99, 5, ((0.1)*usersByDetections$sDetections$approved - (0.1)*usersByDetections$sDetections$rejected + (0.1)*usersByDetections$sVotes$total + (ifelse(usersByDetections$sDetections$total > avgD, 1,0))) 
-)
-pointsActivity[is.na(pointsActivity)] <- 0
-pointsActivity <- round(pointsActivity, 1)
-pointsActivity[c(pointsActivity < 0)] <-0
-userActivity <- avgPointsDetec + pointsActivity
-
-grafico(userActivity, get_effect_percentage(usersByDetections,0),"Users by user activity/effectivity", "Points", "Effectivity" )
-# Se ve claramente que al puntuar la actividad de los usuarios, la usuarios representados en la grafica estan mas dispersos. 
-# Se esta actuando sobre el set de datos de usuarios con puntuacion de detecciones > 0, si lo aplicamos sobre el set de usuarios con puntuacion global > 0,
-# apareceran los restantes osbre el eje X dispersados en funcion de sus votos.
+# Una opcion interesante es mostrar los usuarios en funcion de su puntuacion por deteccion / efectividad. Usaremos por tanto el grupo de los usuarios con puntuacion por deteccion > 0.
+avgPointsDetec <- trunc(usersByDetections$sDetections$points / usersByDetections$sDetections$total , 0)
+avgPointsDetec[c(avgPointsDetec > 100)] <-100
+userEffect <- get_effect_percentage(usersByDetections,0)
+userEffect <- (trunc(userEffect/ 0.02,0) * 0.02)
+# grafico(avgPointsDetec, userEffect,"Users by user activity/effectivity", "Points", "Effectivity" )
 
 
+# Creamos una estructura de datos sobre la que trabajaremos 
+# str[id,points, pointsDetec, avgPointsDetec, effectDetec, votes, votesPoints]
+str <- data.frame(usersByDetections$`_id`,usersByDetections$points, usersByDetections$sDetections$total, avgPointsDetec, userEffect, usersByDetections$sVotes$total,usersByDetections$sVotes$points, 0)
+names(str) <- c("id", "points", "pointsDetec", "avgPointsDetec", "effectDetec", "votes", "votesPoints", "cluster")
 
- 
+# Nos interesa clusterizar en base a su media de puntos por deteccion y su efectividad en detecciones
+dataUser <- as.data.frame(scale(str[,4:5]))
+km <- kmeans(dataUser, centers = 6, nstart=50)
+str$cluster <- km$cluster
+plot(str$avgPointsDetec, str$effectDetec, col = str$cluster, xlab="Average points per detection", ylab="Effectiveness")
+aggregate(str[,2:8], by = list(str$cluster), mean)
 
-
+# Como vemos en el grafico, se ha clusterizado sobre el conjunto de datos str, categorizando a los usuarios, asignandoles un grupo. En este caso se han establecido 6 clusters.
