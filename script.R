@@ -5,6 +5,7 @@ library(mongolite)
 library(scales)
 library(ggplot2)
 library(factoextra)
+library(cluster)
 
 # Variables globales mediante las cuales se obtiene el set de datos. 
 # Se va a dividir en tres partes, detecciones, votos y grupo mixto.
@@ -13,6 +14,7 @@ users_collection <-  "users"
 url_db <- "mongodb://localhost:27017"
 users_fields <-  '{ "_id" : true, "sDetections" : true,  "points" : true, "sVotes" : true}'
 queryy <- '{ "sDetections" : true,  "points" : true, "sVotes" : true}'
+numClusters <-6 # (Por defecto) El analista decide este valor, posteriormente con los diferentes metodos sera modificado.
 
 
 # Funcion que permite obtener un et de datos de una tabla de mongoDb.
@@ -93,7 +95,7 @@ avgPointsDetec <- trunc(usersByDetections$sDetections$points / usersByDetections
 avgPointsDetec[c(avgPointsDetec > 100)] <-100
 userEffect <- get_effect_percentage(usersByDetections,0)
 userEffect <- (trunc(userEffect/ 0.02,0) * 0.02)
-# grafico(avgPointsDetec, userEffect,"Users by user activity/effectivity", "Points", "Effectivity" )
+grafico(avgPointsDetec, userEffect,"Users by user activity/effectivity", "Points", "Effectivity",1 )
 
 
 # Creamos una estructura de datos sobre la que trabajaremos 
@@ -103,9 +105,50 @@ names(str) <- c("id", "points", "pointsDetec", "avgPointsDetec", "effectDetec", 
 
 # Nos interesa clusterizar en base a su media de puntos por deteccion y su efectividad en detecciones
 dataUser <- as.data.frame(scale(str[,4:5]))
-km <- kmeans(dataUser, centers = 6, nstart=50)
-str$cluster <- km$cluster
-plot(str$avgPointsDetec, str$effectDetec, col = str$cluster, xlab="Average points per detection", ylab="Effectiveness")
-aggregate(str[,2:8], by = list(str$cluster), mean)
 
+
+km <- kmeans(dataUser, centers = numClusters, nstart=50)
+kmeansData <- str
+kmeansData$cluster <- km$cluster
+plot(kmeansData$avgPointsDetec, kmeansData$effectDetec, col = kmeansData$cluster, xlab="Average points per detection", ylab="Effectiveness")
+# aggregate(kmeansData[,2:8], by = list(kmeansData$cluster), mean)
 # Como vemos en el grafico, se ha clusterizado sobre el conjunto de datos str, categorizando a los usuarios, asignandoles un grupo. En este caso se han establecido 6 clusters.
+numClusters <- 6
+
+
+# Usando la libreria factoextra podemos observar el numero optimo de cluster a crear, de tal forma que se ve a partir de 6 clusters, la diferencia con un numero de clusters mayor, 
+# es muy cercana a 0 por lo que en princpio, se deberian establecer entre 6-10 clusters
+# pamData <- as.data.frame(scale(str[,4:5]))
+# fviz_nbclust(x = dataUser, FUNcluster = pam, method = "wss", k.max = 15, diss = dist(dataUser, method = "manhattan"))
+
+pam_clusters <- pam(x = dataUser, k = numClusters, metric = "manhattan")
+# fviz_cluster(object = pam_clusters, data = dataUser, ellipse.type = "t",repel = TRUE) +  theme_bw() +  labs(title = "Resultados clustering PAM") +  theme(legend.position = "none")
+# Para mostrar los medoids, con el objecto calculado podemos obtenerlos y resaltarlos.
+# Se seleccionan únicamente las proyecciones de las observaciones que son medoids
+# Se emplean los mismos nombres que en el objeto ggplot
+# Creación del gráfico
+# Se resaltan las observaciones que actúan como medoids
+medoids <- prcomp(dataUser)$x
+medoids <- medoids[rownames(pam_clusters$medoids), c("PC1", "PC2")]
+medoids <- as.data.frame(medoids)
+colnames(medoids) <- c("x", "y")
+fviz_cluster(object = pam_clusters, data = dataUser, ellipse.type = "t", repel = FALSE, show.clust.cent = TRUE, geom = "point")  + theme_bw() + geom_point(data = medoids, color = "firebrick", size = 5) +  labs(title = "Resultados clustering PAM") + theme(legend.position = "none")
+# Como se puede ver en el grafico, obtenemos los diferentes clusters y su shape en forma de eclipse, mediante la cual podemos ver cual es el medoid asociado a cada cluster.
+
+
+# Aplicando Hierarchical Kmeans
+hc_euclidea_completo <- hclust(d = dist(x = dataUser, method = "euclidean"), method = "complete")
+fviz_dend(x = hc_euclidea_completo, cex = 0.5, main = "Linkage completo", sub = "Distancia euclídea") + theme(plot.title =  element_text(hjust = 0.5, size = 15))
+# Viendo el dendograma, podemos observar que hay 5 grandes grupos, al ser las ramificaciones del estilo de 2^n, se deberá ver si vemos el segundo nivel, podemos observar que,
+# tendremos 4 clusters, sin embargo, vemos que eligiendo 4 clusters, la amplitud es muy alta por lo que tendremos grupos con mucha variacion, por lo que se seleccionaran los
+# clusters asociados al siguiente nivel, es decir 2^3, tendremos 8 clusters.
+numClusters <- 8
+hkmeans_cluster <- hkmeans(x = dataUser, hc.metric = "euclidean", hc.method = "complete", k = numClusters)
+fviz_cluster(object = hkmeans_cluster, pallete = "jco", repel = FALSE) + theme_bw() + labs(title = "Hierarchical k-means Clustering")
+
+# Hasta este punto se ha visto como a cada observacion, se le asigna un solo cluster, mediante una clusterizacion difusa podemos saber con que grado, una observacion
+# pertenece a un cluster o a otro.
+fuzzy_cluster <- fanny(x = dataUser, diss = FALSE, k = numClusters, metric = "euclidean", stand = FALSE)
+fviz_cluster(object = fuzzy_cluster, repel = FALSE, ellipse.type = "norm", pallete = "jco") + theme_bw() + labs(title = "Fuzzy Cluster plot")
+
+
