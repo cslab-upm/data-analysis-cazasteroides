@@ -1,163 +1,181 @@
 # Script para obtener la base de datos, mongodb server debe de estar en ejecucion.
-
 # Importamos paquetes necesarios.
 library(mongolite)
 library(scales)
 library(ggplot2)
 library(factoextra)
 library(cluster)
+library(jsonlite)
 
 # Variables globales mediante las cuales se obtiene el set de datos. 
-# Se va a dividir en tres partes, detecciones, votos y grupo mixto.
-db_name <- "caza"
+db_name <- "cazasteroides"
 users_collection <-  "users"
 url_db <- "mongodb://localhost:27017"
-users_fields <-  '{ "_id" : true, "sDetections" : true,  "points" : true, "sVotes" : true}'
-queryy <- '{ "sDetections" : true,  "points" : true, "sVotes" : true}'
-numClusters <-6 # (Por defecto) El analista decide este valor, posteriormente con los diferentes metodos sera modificado.
+users_fields <-  '{ "_id" : true, "sDetections" : true,  "sVotes" : true, "username" : true}'
+set.seed(100)
 
-
-# Funcion que permite obtener un et de datos de una tabla de mongoDb.
+# Metodo que permite obtener un set de datos de una tabla de mongoDb.
 getCollectionDB <- function(db_name, db_collection, url_db, list_fields) {
   ret <-  mongo(collection = db_collection, db = db_name, url = url_db)
-  ret <-getSetCollectionDb(ret, list_fields)
+  ret <-  ret$find(limit = 100000, skip = 0, fields = list_fields)
   ret <- setFormat(ret)
   return(ret)
 }
 
-# Funcion que permite obtener un set de datos sobre una coleccion de mongoDb.
-# Se establece por defecto, un limite de 100000 filas y 0 saltados por el numero de usuarios de la plataforma, en la bd actual hay <4000.
-getSetCollectionDb <- function(collection, list_fields){
-  ret <- collection$find(limit = 100000, skip = 0, fields = list_fields)
-  ret <- setFormat(ret)
-  return(ret)
-}
-
-# Funcion auxiliar con la que se obtiene el conjunto de datos con formato correcto.
+# Metodo auxiliar con la que se obtiene el conjunto de datos con formato correcto.
+# La base de datos proporcionada posee usuarios con puntuaciones negativas o sin puntuacion por defecto.
+# Se sometera al conjunto de datos a un formateado forzoso.
 setFormat <- function(dataSet){
-
-  
-  dataSet$points[is.na(dataSet$points)] <- 0
-  dataSet$points[dataSet$points < 0] <- 0
-  dataSet$points <- round(dataSet$points, 0)
-
-  dataSet$sVotes$wrongs[is.na(dataSet$sVotes$wrongs)] <- 0
-  dataSet$sVotes$corrects[is.na(dataSet$sVotes$corrects)] <- 0
-  dataSet$sVotes$total[is.na(dataSet$sVotes$total)] <- 0 
-  dataSet$sVotes$points[is.na(dataSet$sVotes$points)] <- 0
- dataSet$sVotes$points <- round(dataSet$sVotes$points, 0) 
-
-  dataSet$sDetections$approved[is.na(dataSet$sDetections$approved)] <- 0
-  dataSet$sDetections$rejected[is.na(dataSet$sDetections$rejected)] <- 0
-  dataSet$sDetections$total[is.na(dataSet$sDetections$total)] <- 0 
-  dataSet$sDetections$points[is.na(dataSet$sDetections$points)] <- 0
-   dataSet$sDetections$points <- round( dataSet$sDetections$points, 0) 
-  
+    dataSet$sDetections[is.na(dataSet$sDetections)] <- 0
+    dataSet$sVotes[is.na(dataSet$sVotes)] <- 0
+    dataSet$sDetections[is.na(dataSet$sDetections)] <- 0
   return (dataSet)
 }
 
-
-# Funcion para obtener la efectividad de todos los usuarios sobre una coleccion de usuarios dada.
-# Mode toma valores 0 y 1 en funcion de si se desea calcular la efectividad de sus detecciones o votos
-get_effect_percentage <- function(users, mode) {
-  if(mode == 0) {
-    efect <- users$sDetections$approved / users$sDetections$total
-  }
-  else {
-     efect <- users$sVotes$corrects / users$sVotes$total
-  }
-  efect[is.na(efect)] <- 0
-  ret <- as.numeric(format(round(efect, 2), nsmall =2))
-    return(ret)
+getSTR <- function(target, mode){
+  str <- data.frame(target$`_id`, target$username,(ifelse(target$sVotes$total < 1,0,(target$sVotes$points / target$sVotes$total)/2) + ifelse(target$sDetections$total < 1,0,(target$sDetections$points / target$sDetections$total)/2)),  (ifelse(target$sVotes$total < 1,0,(target$sVotes$corrects / target$sVotes$total)/2) + ifelse(target$sDetections$total < 1,0,(target$sDetections$approved / target$sDetections$total)/2)),target$sDetections$points,target$sVotes$points,target$sDetections$total , target$sVotes$total,0)
+  names(str) <- c("id",  "username", "Puntacion por accion", "Efectividad por accion ","Puntos por detecciones", "Puntos por votos","Detecciones totales" , "Votos totales", "cluster")
+  if(mode == 1) {
+    str[3] <- ifelse(target$sDetections$total < 1,0,(target$sDetections$points / target$sDetections$total))
+    str[4] <- ifelse(target$sDetections$total < 1,0,(target$sDetections$approved / target$sDetections$total))
+  } 
+  if(mode == 2) {
+    str[3] <- ifelse(target$sVotes$total < 1,0,(target$sVotes$points / target$sVotes$total))
+    str[4] <- ifelse(target$sVotes$total < 1,0,(target$sVotes$approved / target$sVotes$total))
+  }  
+  return (str)
 }
 
-# get_user_effect_percentage <- function(id, data){
-#   return (data[data$`_id` == id,]) 
-# }
-
-
-
-getDataAlg <- function (algObject, lCluster, clusters) {
-  ret <- aggregate(algObject[,2:length(algObject)], by = list(lCluster), mean)
-  for(e in 1:clusters) 
-  {
-    ret$totalUsr[e] <- length(which(lCluster == e))
+# Metodo que permite obtener la informacion media de cada cluster de un conjunto de datos.
+# Se utilizara para comparar los resultados obtenidos de los diferentes metodos de clusterizacion.
+getDataAlg <- function (algObject) {
+  ret <- aggregate(algObject[,3:length(algObject)], by = list(algObject$cluster), mean)
+  for(e in 1:10) {
+    ret$totalUsr[e] <- length(which(algObject$cluster == e))
   }
-  ret <- round(ret ,2)
+  ret <- round(ret, 2)
   return (ret)
 }
 
-# Obtenemos el conjunto de datos de todos los usuarios
+getClusterAPI <- function(object, str){
+  ret <- object$username
+  for(i in 1:length(ret)) {
+    ret[i] <- ifelse( length(str[c(str["username"] == ret[i]),]$cluster)>0, str[c(str["username"] == ret[i]),]$cluster, 0)
+  }
+  return(ret)
+}
+
+getIdAPI <- function(object, str){
+  ret <- object$username
+  for(i in 1:length(ret)) {
+    ret[i] <- ifelse( length(str[c(str["username"] == ret[i]),]$id)>0, str[c(str["username"] == ret[i]),]$id, 0)
+  }
+  return(ret)
+}
+
+# Se obtiene el conjunto de datos de todos los usuarios y se agrupan en datos pre-procesados.
 users <- getCollectionDB(db_name, users_collection, url_db, users_fields)
+totalUsers <- users
+users <- users[c(users$sDetections$total > 0 | users$sVotes$total > 0),]
+users <- users[c((users$sDetections$points + users$sVotes$points) > 0),]
+usersByDetections <- users[c(users$sDetections$points > 0),] 
+usersByVotes <- users[c(users$sVotes$points > 0),] 
+# usersByAPI <- users[c(users$sDetections$approved > 50 | users$sVotes$corrects > 50),]
+# [target: users , mode : 0]
+# [target: usersByDetections , mode : 1]
+# [target: usersByVotes , mode : 2]
+target <- users
+mode <- 0
+str <- getSTR(target, mode)
+dataUser <- as.data.frame(str[,3:4])
+dataUserScaled <- as.data.frame(scale(str[,3:4]))
+names(dataUserScaled) <- c("x", "y") 
 
-# Separamos en tres grupos, usuarios por detecciones, por votos y total.
-# Eliminamos los usuarios con puntuación 0. Pasamos de 3668 elementos a 1072.
-users <- users[c(users$points > 0),] #1072 usuarios
-usersByDetections <- users[c(users$sDetections$points > 0),] #541 usuarios
-usersByVotes <- users[c(users$sVotes$points > 0),] #921 usuarios
-
-# Una opcion interesante es mostrar los usuarios en funcion de su puntuacion por deteccion / efectividad. Usaremos por tanto el grupo de los usuarios con puntuacion por deteccion > 0.
-avgPointsDetec <- trunc(usersByDetections$sDetections$points / usersByDetections$sDetections$total , 0)
-avgPointsDetec[c(avgPointsDetec > 100)] <-100
-userEffect <- get_effect_percentage(usersByDetections,0)
-userEffect <- (trunc(userEffect/ 0.02,0) * 0.02)
-
-# Creamos una estructura de datos sobre la que trabajaremos 
-# str[id,puntos, puntos obtenidos por detecciones, media de puntos obtenidos por detecciones, efectividad de las deteccion, votos totales, puntos obtenidos por votos]
-str <- data.frame(usersByDetections$`_id`,usersByDetections$points, usersByDetections$sDetections$total, avgPointsDetec, userEffect, usersByDetections$sVotes$total,usersByDetections$sVotes$points)
-names(str) <- c("id", "points", "pointsDetec", "avgPointsDetec", "effectDetec", "votes", "votesPoints")
-grafico_sin_clusterizacion <- ggplot(str, aes(x = str$avgPointsDetec, y = str$effectDetec)) + geom_point(size = 2.5)+ theme_bw()
-
-# Nos interesa clusterizar en base a su media de puntos por deteccion y su efectividad en detecciones
-# Si clusterizo en funcion de sus puntos, la clusterizacion difusa no es capaz de converger llegado a las 500 iteraciones.
-dataUser <- as.data.frame(scale(str[,4:5]))
-
-
-km <- kmeans(dataUser, centers = numClusters, nstart=50)
-# grafico_kmeans <- plot(str$avgPointsDetec, str$effectDetec, col = km$cluster, xlab="Average points per detection", ylab="Effectiveness")
-cluster <- km$cluster
-grafico_kmeans <- ggplot(str, aes(x = str$avgPointsDetec, y = str$effectDetec, pallete = "jco",color = cluster)) + geom_point(size = 2.5)+ theme_bw()
-infoDataKmeans <- getDataAlg(str, km$cluster, numClusters)
-# Como vemos en el grafico, se ha clusterizado sobre el conjunto de datos str, categorizando a los usuarios, asignandoles un grupo. En este caso se han establecido 6 clusters.
-numClusters <- 6
+# Calculo numero mas eficiente de clusters
+clusters <- kmeans(dataUser, centers = 1, nstart=50)$betweenss
+for(i in 2:13) clusters[i] <- kmeans(dataUser, centers = i, nstart=50)$betweenss
+clusters.diff <- clusters[2] - clusters[1]
+for(i in 2:12) clusters.diff[i] <- clusters[i+1] - clusters[i]
+# grafico.nOptimo.kmeans <- plot(1:13, clusters, type="b", xlab="Numero de clusters", ylab="Suma de cuadrados inter grupos")
+# grafico.nOptimo.factoextra <- fviz_nbclust(x = dataUser, FUNcluster = pam, method = "wss", k.max = 12, diss = dist(dataUser, method = "manhattan")) + labs(title = "Busqueda numero optimo de clusters", x = "Numero de clusters", y = "Valor suma de cuadrados", color ="Cluster")
+numClusters <- 10
 
 
-# Usando la libreria factoextra podemos observar el numero optimo de cluster a crear, de tal forma que se ve a partir de 6 clusters, la diferencia con un numero de clusters mayor, 
-# es muy cercana a 0 por lo que en princpio, se deberian establecer entre 6-10 clusters
-pamData <- as.data.frame(scale(str[,4:5]))
-grafico_evalocion_cluster <- fviz_nbclust(x = dataUser, FUNcluster = pam, method = "wss", k.max = 15, diss = dist(dataUser, method = "manhattan"))
-
-pam_clusters <- pam(x = dataUser, k = numClusters, metric = "manhattan")
-grafico_pam_no_medoids <- fviz_cluster(object = pam_clusters, data = dataUser, ellipse.type = "t",repel = TRUE, geom = "point") +  theme_bw() +  labs(title = "Resultados clustering PAM") +  theme(legend.position = "none")
-# Para mostrar los medoids, con el objecto calculado podemos obtenerlos y resaltarlos.
-# Se seleccionan únicamente las proyecciones de las observaciones que son medoids
-# Se emplean los mismos nombres que en el objeto ggplot
-# Creación del gráfico
-# Se resaltan las observaciones que actúan como medoids
-medoids <- prcomp(dataUser)$x
-medoids <- medoids[rownames(pam_clusters$medoids), c("PC1", "PC2")]
-medoids <- as.data.frame(medoids)
-colnames(medoids) <- c("x", "y")
-grafico_pam <-fviz_cluster(object = pam_clusters, data = dataUser, ellipse.type = "t", repel = FALSE, show.clust.cent = TRUE, geom = "point")  + theme_bw() + geom_point(data = medoids, color = "firebrick", size = 5) +  labs(title = "Resultados clustering PAM") + theme(legend.position = "none")
-infoDataPAM <- getDataAlg(str, pam_clusters$clustering, numClusters)
-# Como se puede ver en el grafico, obtenemos los diferentes clusters y su shape en forma de eclipse, mediante la cual podemos ver cual es el medoid asociado a cada cluster.
+# Obtencion grafico poblacion total de usuarios.
+data.noClusters <- dataUserScaled
+# grafico.sin_clusterizacion <- ggplot(data.noClusters, aes(x = data.noClusters$x, y = data.noClusters$y)) + geom_point(size = 1)+ theme_bw() + labs(x = "Puntuacion media", y = "Media de efectividad")
 
 
-# Aplicando Hierarchical Kmeans
-hc_euclidea_completo <- hclust(d = dist(x = dataUser, method = "euclidean"), method = "complete")
-grafico_dendograma <- fviz_dend(x = hc_euclidea_completo, cex = 0.5, main = "Linkage completo", sub = "Distancia euclídea") + theme(plot.title =  element_text(hjust = 0.5, size = 15))
-# Viendo el dendograma, podemos observar que hay 5 grandes grupos, al ser las ramificaciones del estilo de 2^n, se deberá ver si vemos el segundo nivel, podemos observar que,
-# tendremos 4 clusters, sin embargo, vemos que eligiendo 4 clusters, la amplitud es muy alta por lo que tendremos grupos con mucha variacion, por lo que se seleccionaran los
-# clusters asociados al siguiente nivel, es decir 2^3, tendremos 8 clusters.
-numClusters <- 8
-hkmeans_cluster <- hkmeans(x = dataUser, hc.metric = "euclidean", hc.method = "complete", k = numClusters)
-grafico_hkmeans <- fviz_cluster(object = hkmeans_cluster, pallete = "jco", repel = FALSE, geom = "point") + theme_bw() + labs(title = "Hierarchical k-means Clustering")
-infoDataHKmeans <- getDataAlg(str, hkmeans_cluster$cluster, numClusters)
+# Aplicacion del algoritmo KMeans, asignacion de clusters a la estructura str
+data.kmeans.data <- dataUserScaled
+data.kmeans <-  kmeans(data.kmeans.data, centers = numClusters, nstart=50)
+data.kmeans.cluster <- data.kmeans$cluster
+data.kmeans.str <- str
+data.kmeans.str$cluster <-data.kmeans.cluster
+grafico.kmeans <- ggplot(data = data.kmeans.data, aes(x = data.kmeans.data$x, y = data.kmeans.data$y, group = data.kmeans.cluster ,color = as.factor(data.kmeans.cluster)))+ geom_point(size = 1) + theme_bw() + labs(x = "Puntuacion media", y = "Media de efectividad") + theme(legend.position = "none")
 
 
-# Hasta este punto se ha visto como a cada observacion, se le asigna un solo cluster, mediante una clusterizacion difusa podemos saber con que grado, una observacion
-# pertenece a un cluster o a otro.
-fuzzy_cluster <- fanny(x = dataUser, diss = FALSE, k = numClusters, metric = "euclidean", stand = FALSE)
-grafico_fuzzy <- fviz_cluster(object = fuzzy_cluster, repel = FALSE, ellipse.type = "norm", pallete = "jco", geom = "point") + theme_bw() + labs(title = "Fuzzy Cluster plot")
-infoDataFuzzy <- getDataAlg(str, fuzzy_cluster$clustering, numClusters)
+# Aplicacion del algoritmo Kmedoid emplando metodo PAM, calculo de medoids y asignacion de clusters.
+data.kmedoid.data <- dataUser
+data.kmedoid <- pam(x = data.kmedoid.data, k = numClusters, metric = "manhattan")
+data.kmedoid.medoids <- prcomp(data.kmedoid.data)$x
+data.kmedoid.medoids <- data.kmedoid.medoids[rownames(data.kmedoid$medoids), c("PC1", "PC2")]
+data.kmedoid.medoids <- as.data.frame(data.kmedoid.medoids)
+colnames(data.kmedoid.medoids) <- c("x", "y")
+data.kmedoid.cluster <- data.kmedoid$clustering
+data.kmedoid.str <- str
+data.kmedoid.str$cluster <- data.kmedoid.cluster
+# grafico.pam.poly <-fviz_cluster(object = data.kmedoid, pallete = "jco", repel = FALSE, geom= "point") + theme_bw() + geom_point(data = data.kmedoid.medoids, color = "firebrick", size = 1) +  labs(x = "Puntuacion media", y = "Media de efectividad", colour = "Cluster", title ="") + theme(legend.position = "none")
+# grafico.pam.ellip <-fviz_cluster(object = data.kmedoid, repel = FALSE, ellipse.type = "t", pallete = "jco", geom = "point") + theme_bw() + geom_point(data = data.kmedoid.medoids, color = "firebrick", size = 1) +  labs(x = "Puntuacion media", y = "Media de efectividad", colour = "Cluster", title ="") + theme(legend.position = "none")
+grafico.pam_no_medoids <-fviz_cluster(object = data.kmedoid, data = data.kmedoid.data, ellipse = "FALSE",repel = TRUE, geom = "point") +  theme_bw() +  labs(x = "Puntuacion media", y = "Media de efectividad", color = "Cluster") +  theme(legend.position = "none")
+
+
+data.hkmeans.data <- dataUserScaled
+data.hkmeans.dendograma <- hclust(d = dist(x = data.hkmeans.data, method = "euclidean"), method = "complete")
+data.hkmeans <- hkmeans(x = data.hkmeans.data, hc.metric = "euclidean", hc.method = "complete", k = numClusters)
+data.hkmeans.str <- str
+data.hkmeans.cluster <- data.hkmeans$cluster
+data.hkmeans.str$cluster <- data.hkmeans.cluster
+# grafico.dendograma <- fviz_dend(x = data.hkmeans.dendograma, cex = 0.5, main = "Dendograma clusterizacion HKmeans", sub = "Distancia euclidea", rect =TRUE, horiz = TRUE, repel=FALSE) + theme(plot.title =  element_text(hjust = 0.5, size = 15))
+grafico.hkmeans <- fviz_cluster(object = data.hkmeans, data = data.hkmeans.data ,pallete = "jco", ellipse = FALSE, repel = TRUE, show.clust.cent = TRUE, geom = "point")  + theme_bw() + labs(x = "Puntuacion media", y = "Media de efectividad", colour = "Cluster", title ="") + theme(legend.position = "none")
+
+
+# # Aplicacion del algoritmo difuso Fuzzy junto con asignacion de clusters.
+data.fuzzy.data <- dataUser
+data.fuzzy <- fanny(x = data.fuzzy.data, k = numClusters, memb.exp = 2, metric = "SqEuclidean", stand = FALSE, iniMem.p = NULL, cluster.only = FALSE, maxit = 500, tol = 1e-15, trace.lev = 0)
+data.fuzzy.str <- str
+data.fuzzy.cluster <- data.fuzzy$clustering
+data.fuzzy.str$cluster <- data.fuzzy.cluster
+# grafico.fuzzy.poly <- fviz_cluster(object = data.fuzzy, pallete = "jco", repel = FALSE, geom= "point") + theme_bw() +  labs(x = "Puntuacion media", y = "Media de efectividad", colour = "Cluster", title ="") + theme(legend.position = "none")
+grafico.fuzzy <- fviz_cluster(object = data.fuzzy, data = data.fuzzy.data ,pallete = "jco", ellipse = FALSE, repel = TRUE, show.clust.cent = FALSE, geom = "point")  + theme_bw()  +  labs(x = "Puntuacion media", y = "Media de efectividad", colour = "Cluster", title ="") + theme(legend.position = "none")
+# grafico.fuzzy.ellip <- fviz_cluster(object = data.fuzzy, repel = FALSE, ellipse.type = "norm", pallete = "jco", geom = "point") + theme_bw() +  labs(x = "Puntuacion media", y = "Media de efectividad", colour = "Cluster", title ="") + theme(legend.position = "none")
+
+
+# Obtencion informacion media de cada cluster por algoritmos
+info.kmeans <- getDataAlg(data.kmeans.str)
+info.kmedoid <- getDataAlg(data.kmedoid.str)
+info.hkmeans <- getDataAlg(data.hkmeans.str)
+info.fuzzy <- getDataAlg(data.fuzzy.str)
+
+# Obtencion usuarios mediante el API
+api.users.effectiveDetections <- fromJSON("http://api.cazasteroides.org/statistics/top/500/moreEffectiveDetections")
+api.users.effectiveVotes <- fromJSON("http://api.cazasteroides.org/statistics/top/500/moreEffectiveVotes")
+
+api.users.id <- getIdAPI(api.users.effectiveDetections, data.kmeans.str) 
+api.kmeans.effectiveDetections <- getClusterAPI(api.users.effectiveDetections, data.kmeans.str)
+api.kmeans.effectiveVotes <- getClusterAPI(api.users.effectiveVotes, data.kmeans.str)
+
+api.kmedoid.effectiveDetections <- getClusterAPI(api.users.effectiveDetections, data.kmedoid.str)
+api.kmedoid.effectiveVotes <- getClusterAPI(api.users.effectiveVotes, data.kmedoid.str)
+
+api.hkmeans.effectiveDetections <- getClusterAPI(api.users.effectiveDetections, data.hkmeans.str)
+api.hkmeans.effectiveVotes <- getClusterAPI(api.users.effectiveVotes, data.hkmeans.str)
+
+api.fuzzy.effectiveDetections <- getClusterAPI(api.users.effectiveDetections, data.fuzzy.str)
+api.fuzzy.effectiveVotes <- getClusterAPI(api.users.effectiveVotes, data.fuzzy.str)
+
+# Comparacion de usuarios del API y su asignacion mediante los diferentes algoritmos
+api.compare.effectiveDetections <- data.frame(api.kmeans.effectiveDetections ,api.kmedoid.effectiveDetections , api.hkmeans.effectiveDetections,api.fuzzy.effectiveDetections,api.users.id)
+api.compare.effectiveVotes <- data.frame(api.kmeans.effectiveVotes ,api.kmedoid.effectiveVotes , api.hkmeans.effectiveVotes,api.fuzzy.effectiveVotes, api.users.id)
+
 
